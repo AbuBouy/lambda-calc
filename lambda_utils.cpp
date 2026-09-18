@@ -2,6 +2,7 @@
 #include "lambda_term.hpp"
 #include<string>
 #include<unordered_set>
+#include<utility>
 using namespace lambda;
 
 
@@ -35,16 +36,10 @@ LambdaTerm clone(const LambdaTerm& term) {
             return var;
         },
         [](const Abstraction& abs) -> LambdaTerm {
-            return Abstraction{
-                .parameter = abs.parameter,
-                .body = std::make_unique<LambdaTerm>(clone(*abs.body))
-            };
+            return abstraction(abs.parameter, clone(*abs.body));
         },
         [](const Application& app) -> LambdaTerm {
-            return Application{
-                .function = std::make_unique<LambdaTerm>(clone(*app.function)),
-                .argument = std::make_unique<LambdaTerm>(clone(*app.argument))
-            };
+           return application(clone(*app.function), clone(*app.argument));
         }
     }, term);
 }
@@ -61,18 +56,52 @@ LambdaTerm substitute(LambdaTerm term, const std::string& target_var, const Lamb
             if (abs.parameter == target_var) {
                 return abs;
             }
-            if (free_vars(replacement).contains(abs.parameter)) {
-                std::string old_parameter = abs.parameter;
-                abs.parameter = fresh_var_name(abs.parameter);
-                *abs.body = substitute(std::move(*abs.body), old_parameter, Variable{abs.parameter});
+
+            LambdaTerm body_term = std::move(*abs.body);
+            std::string current_parameter = std::move(abs.parameter);
+            
+            if (free_vars(replacement).contains(current_parameter)) {
+                std::string old_parameter = current_parameter;
+                current_parameter = fresh_var_name(old_parameter);
+                body_term = substitute(std::move(body_term), old_parameter, variable(current_parameter));
             }
-            *abs.body = substitute(std::move(*abs.body), target_var, replacement);
-            return abs;
+
+            body_term = substitute(std::move(body_term), target_var, replacement);
+            return abstraction(std::move(current_parameter), std::move(body_term));
         },
         [&](Application app) -> LambdaTerm {
-            *app.function = substitute(std::move(*app.function), target_var, replacement);
-            *app.argument = substitute(std::move(*app.argument), target_var, replacement);
-            return app;
+            LambdaTerm new_function = substitute(std::move(*app.function), target_var, replacement);
+            LambdaTerm new_argument = substitute(std::move(*app.argument), target_var, replacement);
+            return application(std::move(new_function), std::move(new_argument));
         }
+    }, std::move(term));
+}
+
+std::pair<LambdaTerm, bool> applicative_order_step(LambdaTerm term) {
+    return std::visit(overloaded{
+        [&](Variable var) -> std::pair<LambdaTerm, bool> {
+            return {var, false};
+        },
+        [&](Abstraction abs) -> std::pair<LambdaTerm, bool> {
+            auto [new_body, body_reduced] = applicative_order_step(std::move(*abs.body));
+            return {abstraction(std::move(abs.parameter), std::move(new_body)), body_reduced};
+        },
+        [&](Application app) -> std::pair<LambdaTerm, bool> {
+            auto [new_function, function_reduced] = applicative_order_step(std::move(*app.function));
+            if (function_reduced) {
+                return {application(std::move(new_function), std::move(*app.argument)), true};
+            }
+            auto [new_argument, argument_reduced] = applicative_order_step(std::move(*app.argument));
+            if (argument_reduced) {
+                return {application(std::move(new_function), std::move(new_argument)), true};
+            }
+
+            if (auto abs_ptr = std::get_if<Abstraction>(&new_function)) {
+                LambdaTerm new_term = substitute(std::move(*abs_ptr->body), abs_ptr->parameter, new_argument);
+                return {std::move(new_term), true};
+            }
+            
+            return {application(std::move(new_function), std::move(new_argument)), false};
+        },
     }, std::move(term));
 }
